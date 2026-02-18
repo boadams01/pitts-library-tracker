@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Pitts Theology Library — Patron Traffic</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=Source+Sans+3:wght@300;400;600&display=swap');
 
@@ -700,16 +701,46 @@
 </div>
 
 <script>
-// ── Storage ──────────────────────────────────────────────────────────────────
-const DB_KEY = 'pitts_library_data';
+// ── Supabase ──────────────────────────────────────────────────────────────────
+const SUPABASE_URL = 'https://osnndkdongxzlblcdcti.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_EhWwz_XYZGrIDpgJHn2Krw_bbpwZ65F';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-function loadDB() {
-  try { return JSON.parse(localStorage.getItem(DB_KEY) || '[]'); } 
-  catch { return []; }
+// In-memory cache so we don't re-fetch on every render
+let _dbCache = null;
+
+async function loadDB() {
+  if (_dbCache) return _dbCache;
+  const { data, error } = await sb.from('reports').select('*').order('week_start', { ascending: true });
+  if (error) { console.error('Supabase load error:', error); return []; }
+  // Map snake_case columns to camelCase for compatibility
+  _dbCache = data.map(r => ({
+    weekStart: r.week_start,
+    weekEnd: r.week_end,
+    categories: r.categories,
+    total: r.total,
+    savedAt: r.saved_at
+  }));
+  return _dbCache;
 }
 
-function saveDB(data) {
-  localStorage.setItem(DB_KEY, JSON.stringify(data));
+function invalidateCache() { _dbCache = null; }
+
+async function insertReport(report) {
+  const { error } = await sb.from('reports').insert({
+    week_start: report.weekStart,
+    week_end: report.weekEnd || null,
+    categories: report.categories,
+    total: report.total
+  });
+  if (error) throw new Error(error.message);
+  invalidateCache();
+}
+
+async function deleteReportFromDB(weekStart) {
+  const { error } = await sb.from('reports').delete().eq('week_start', weekStart);
+  if (error) throw new Error(error.message);
+  invalidateCache();
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -807,9 +838,9 @@ function parseAndPreview() {
   }
 }
 
-function saveReport() {
+async function saveReport() {
   if (!pendingReport) return;
-  const db = loadDB();
+  const db = await loadDB();
 
   const dup = db.find(r => r.weekStart === pendingReport.weekStart);
   if (dup) {
@@ -817,14 +848,15 @@ function saveReport() {
     return;
   }
 
-  db.push({ ...pendingReport, savedAt: new Date().toISOString() });
-  db.sort((a, b) => new Date(a.weekStart) - new Date(b.weekStart));
-  saveDB(db);
-
-  showAlert('Report saved successfully!', 'success');
-  document.getElementById('parse-preview').style.display = 'none';
-  document.getElementById('paste-area').value = '';
-  pendingReport = null;
+  try {
+    await insertReport(pendingReport);
+    showAlert('Report saved successfully!', 'success');
+    document.getElementById('parse-preview').style.display = 'none';
+    document.getElementById('paste-area').value = '';
+    pendingReport = null;
+  } catch(e) {
+    showAlert('Error saving report: ' + e.message, 'error');
+  }
 }
 
 function importMultipleFiles(files) {
@@ -839,30 +871,27 @@ function importMultipleFiles(files) {
     r.readAsText(file);
   }));
 
-  Promise.all(readers).then(results => {
-    const db = loadDB();
+  Promise.all(readers).then(async results => {
+    const db = await loadDB();
     let imported = 0, skipped = 0, failed = 0;
     const skipList = [], failList = [];
 
-    results.forEach(({ name, text, error }) => {
-      if (error) { failed++; failList.push(name); return; }
+    for (const { name, text, error } of results) {
+      if (error) { failed++; failList.push(name); continue; }
       try {
         const report = parseReport(text);
         if (db.find(r => r.weekStart === report.weekStart)) {
           skipped++;
           skipList.push(report.weekStart);
-          return;
+          continue;
         }
-        db.push({ ...report, savedAt: new Date().toISOString() });
+        await insertReport(report);
         imported++;
       } catch(e) {
         failed++;
         failList.push(`${name} (${e.message})`);
       }
-    });
-
-    db.sort((a, b) => new Date(a.weekStart) - new Date(b.weekStart));
-    saveDB(db);
+    }
 
     let msg = `✓ Imported <strong>${imported}</strong> report${imported !== 1 ? 's' : ''}.`;
     if (skipped) msg += ` <strong>${skipped}</strong> skipped (already in database).`;
@@ -895,8 +924,8 @@ function destroyChart(id) {
 
 const COLORS = ['#8b3a15','#b8922a','#2d6a4f','#3a4a8b','#7a3a8b','#3a8b7a','#8b7a3a','#5a3a8b','#8b3a6a','#3a6a8b'];
 
-function renderDashboard() {
-  const db = loadDB();
+async function renderDashboard() {
+  const db = await loadDB();
 
   // Populate year filter
   const yearSel = document.getElementById('year-filter');
@@ -1030,8 +1059,8 @@ function getTopCat(report) {
 }
 
 // ── Data View ─────────────────────────────────────────────────────────────────
-function renderData() {
-  const db = loadDB();
+async function renderData() {
+  const db = await loadDB();
 
   // Weeks list
   const list = document.getElementById('weeks-list');
@@ -1062,8 +1091,8 @@ function renderData() {
   renderTable();
 }
 
-function renderTable() {
-  const db = loadDB();
+async function renderTable() {
+  const db = await loadDB();
   const yr = document.getElementById('table-year').value;
   const cat = document.getElementById('table-category').value;
 
@@ -1086,16 +1115,19 @@ function renderTable() {
       </tr>`).join('');
 }
 
-function deleteReport(weekStart) {
+async function deleteReport(weekStart) {
   if (!confirm(`Delete the report for week of ${weekStart}?`)) return;
-  const db = loadDB().filter(r => r.weekStart !== weekStart);
-  saveDB(db);
-  renderData();
+  try {
+    await deleteReportFromDB(weekStart);
+    renderData();
+  } catch(e) {
+    alert('Error deleting report: ' + e.message);
+  }
 }
 
 // ── Export ────────────────────────────────────────────────────────────────────
-function exportCSV() {
-  const db = loadDB();
+async function exportCSV() {
+  const db = await loadDB();
   if (db.length === 0) { alert('No data to export.'); return; }
 
   const rows = [['Week Start', 'Week End', 'Category', 'Category ID', 'Accesses', 'Week Total']];
@@ -1246,8 +1278,8 @@ function saveCatMappings() {
 
 
 // ── Analytics ─────────────────────────────────────────────────────────────────
-function renderAnalytics() {
-  const db = loadDB();
+async function renderAnalytics() {
+  const db = await loadDB();
   const years = [...new Set(db.map(r => r.weekStart.split('/')[2]))].sort();
 
   // Populate all year selects
@@ -1266,8 +1298,8 @@ function renderAnalytics() {
 }
 
 // ── Drill-down ────────────────────────────────────────────────────────────────
-function renderDrilldown() {
-  const db = loadDB();
+async function renderDrilldown() {
+  const db = await loadDB();
   const yr = document.getElementById('drill-year').value;
   const mo = document.getElementById('drill-month').value;
 
@@ -1324,8 +1356,8 @@ function renderDrilldown() {
 }
 
 // ── Category Trends ───────────────────────────────────────────────────────────
-function renderCatTrend() {
-  const db = loadDB();
+async function renderCatTrend() {
+  const db = await loadDB();
   const yr = document.getElementById('cattrend-year').value;
   const mode = document.getElementById('cattrend-mode').value;
 
@@ -1372,8 +1404,8 @@ function renderCatTrend() {
 }
 
 // ── Peak & Slowest ────────────────────────────────────────────────────────────
-function renderPeaks() {
-  const db = loadDB();
+async function renderPeaks() {
+  const db = await loadDB();
   const yr = document.getElementById('peak-year').value;
   const n = parseInt(document.getElementById('peak-n').value);
 
