@@ -1297,13 +1297,28 @@ function renderDrilldown() {
   filtered.forEach(r => r.categories.forEach(c => { catTotals[c.name] = (catTotals[c.name]||0) + c.count; }));
   const cats = Object.entries(catTotals).filter(([,v]) => v > 0).sort((a,b) => b[1]-a[1]);
   if (cats.length > 0) {
+    const drillTotal = cats.reduce((s, [,v]) => s + v, 0);
     charts['drill-cats'] = new Chart(document.getElementById('chart-drill-cats'), {
       type: 'doughnut',
       data: {
         labels: cats.map(([k]) => k),
         datasets: [{ data: cats.map(([,v]) => v), backgroundColor: COLORS }]
       },
-      options: { responsive: true, plugins: { legend: { position: 'right', labels: { font: { size: 10 } } } } }
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { position: 'right', labels: { font: { size: 10 } } },
+          tooltip: {
+            callbacks: {
+              label: ctx => {
+                const val = ctx.parsed;
+                const pct = drillTotal > 0 ? (val / drillTotal * 100).toFixed(1) : 0;
+                return ` ${ctx.label}: ${val.toLocaleString()} (${pct}%)`;
+              }
+            }
+          }
+        }
+      }
     });
   }
 }
