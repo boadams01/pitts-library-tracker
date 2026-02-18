@@ -633,7 +633,7 @@ function parseReport(text) {
   const weekEnd = endMatch ? endMatch[1] : null;
 
   // Extract categories
-  const catRegex = /ACCESS CATEGORY #\s*(\d+) --> (.+?)\nEND ACCESS CATEGORY #\s*\1 ---> .*?= (\d+) ACCESSES/g;
+  const catRegex = /ACCESS CATEGORY #\s*(\d+) --> (.*?)\nEND ACCESS CATEGORY #\s*\1 ---> .*?= (\d+) ACCESSES/g;
   const categories = [];
   let match;
   const catNames = loadCatNames();
