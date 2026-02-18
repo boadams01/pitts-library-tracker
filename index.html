@@ -621,6 +621,9 @@ function switchView(name) {
 let pendingReport = null;
 
 function parseReport(text) {
+  // Normalize line endings (Windows \r\n -> \n)
+  text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
   // Extract date range
   const dateMatch = text.match(/Beginning:\s*(\d{2}\/\d{2}\/\d{4})/);
   const endMatch = text.match(/Ending:\s*(\d{2}\/\d{2}\/\d{4})/);
