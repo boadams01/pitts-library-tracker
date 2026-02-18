@@ -651,7 +651,7 @@ function parseReport(text) {
     }
   }
 
-  if (categories.length === 0) throw new Error('No category data found. Please check the report format.');
+  // Zero-visit weeks are valid — no categories will be present
 
   const totalMatch = text.match(/END REPORT - (\d+) ACCESSES/);
   const total = totalMatch ? parseInt(totalMatch[1]) : categories.reduce((s, c) => s + c.count, 0);
@@ -750,7 +750,7 @@ function importMultipleFiles(files) {
         imported++;
       } catch(e) {
         failed++;
-        failList.push(name);
+        failList.push(`${name} (${e.message})`);
       }
     });
 
