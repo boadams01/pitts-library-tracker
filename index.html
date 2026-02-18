@@ -452,6 +452,35 @@
   .new-cat-row input:focus { outline: none; border-color: var(--accent); }
   .settings-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; }
   .settings-note { font-size: 0.82rem; color: var(--muted); margin-bottom: 1.25rem; line-height: 1.5; }
+
+  /* ANALYTICS */
+  .analytics-filters {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .analytics-filters label { font-size: 0.82rem; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; }
+  .peak-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  .peak-table th { background: var(--ink); color: var(--parchment); padding: 0.65rem 1rem; text-align: left; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.07em; }
+  .peak-table td { padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); }
+  .peak-table tr:last-child td { border-bottom: none; }
+  .peak-table tr:hover td { background: rgba(139,58,21,0.03); }
+  .peak-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 3px; font-size: 0.75rem; font-weight: 600; }
+  .peak-high { background: rgba(139,58,21,0.12); color: var(--accent); }
+  .peak-low  { background: rgba(45,106,79,0.12); color: var(--success); }
+  .drilldown-week-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0.5rem 0; border-bottom: 1px solid var(--border); font-size: 0.88rem;
+  }
+  .drilldown-week-row:last-child { border-bottom: none; }
+  .drilldown-bar-wrap { flex: 1; margin: 0 1rem; height: 10px; background: var(--warm-mid); border-radius: 5px; overflow: hidden; }
+  .drilldown-bar { height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.4s ease; }
 </style>
 </head>
 <body>
@@ -465,6 +494,7 @@
     <button class="nav-tab active" onclick="switchView('dashboard')">Dashboard</button>
     <button class="nav-tab" onclick="switchView('import')">Import Report</button>
     <button class="nav-tab" onclick="switchView('data')">Data &amp; Export</button>
+    <button class="nav-tab" onclick="switchView('analytics')">Analytics</button>
     <button class="nav-tab" onclick="switchView('settings')">⚙ Settings</button>
   </div>
 </header>
@@ -566,6 +596,82 @@
     </div>
   </div>
 
+  <!-- ANALYTICS VIEW -->
+  <div class="view" id="view-analytics">
+
+    <!-- Month/Year Drill-down -->
+    <div class="section-title">Month &amp; Year Drill-down</div>
+    <div class="analytics-filters">
+      <label>Year</label>
+      <select id="drill-year" onchange="renderDrilldown()"><option value="">— select —</option></select>
+      <label>Month</label>
+      <select id="drill-month" onchange="renderDrilldown()">
+        <option value="">All months</option>
+        <option value="1">January</option><option value="2">February</option>
+        <option value="3">March</option><option value="4">April</option>
+        <option value="5">May</option><option value="6">June</option>
+        <option value="7">July</option><option value="8">August</option>
+        <option value="9">September</option><option value="10">October</option>
+        <option value="11">November</option><option value="12">December</option>
+      </select>
+    </div>
+    <div class="charts-grid" style="margin-bottom:1.5rem">
+      <div class="chart-card">
+        <h3 id="drill-weeks-title">Weekly Breakdown</h3>
+        <div id="drill-weeks-bars"></div>
+      </div>
+      <div class="chart-card">
+        <h3>Category Mix</h3>
+        <canvas id="chart-drill-cats" style="max-height:240px"></canvas>
+      </div>
+    </div>
+
+    <!-- Category Trends -->
+    <div class="section-title">Category Trends Over Time</div>
+    <div class="analytics-filters">
+      <label>Year</label>
+      <select id="cattrend-year" onchange="renderCatTrend()"><option value="all">All Years</option></select>
+      <label>View</label>
+      <select id="cattrend-mode" onchange="renderCatTrend()">
+        <option value="count">Raw counts</option>
+        <option value="pct">% of total</option>
+      </select>
+    </div>
+    <div class="chart-card" style="margin-bottom:1.5rem">
+      <canvas id="chart-cattrend" style="max-height:320px"></canvas>
+    </div>
+
+    <!-- Peak & Slowest Weeks -->
+    <div class="section-title">Peak &amp; Slowest Weeks</div>
+    <div class="analytics-filters">
+      <label>Year</label>
+      <select id="peak-year" onchange="renderPeaks()"><option value="all">All Years</option></select>
+      <label>Show top/bottom</label>
+      <select id="peak-n" onchange="renderPeaks()">
+        <option value="5">5</option>
+        <option value="10">10</option>
+        <option value="20">20</option>
+      </select>
+    </div>
+    <div class="charts-grid" style="margin-bottom:2rem">
+      <div class="chart-card">
+        <h3>🔺 Busiest Weeks</h3>
+        <table class="peak-table" id="peak-high-table">
+          <thead><tr><th>Week of</th><th>Total</th><th></th></tr></thead>
+          <tbody id="peak-high-body"></tbody>
+        </table>
+      </div>
+      <div class="chart-card">
+        <h3>🔻 Slowest Weeks</h3>
+        <table class="peak-table" id="peak-low-table">
+          <thead><tr><th>Week of</th><th>Total</th><th></th></tr></thead>
+          <tbody id="peak-low-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
   <!-- SETTINGS VIEW -->
   <div class="view" id="view-settings">
     <div class="section-title">Category Name Settings</div>
@@ -615,6 +721,7 @@ function switchView(name) {
   if (name === 'dashboard') renderDashboard();
   if (name === 'data') renderData();
   if (name === 'settings') renderSettings();
+  if (name === 'analytics') renderAnalytics();
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
@@ -1135,6 +1242,144 @@ function saveCatMappings() {
   localStorage.setItem(NAMES_KEY, JSON.stringify(pendingMappings));
   document.getElementById('settings-alert').innerHTML =
     '<div class="alert alert-success" style="margin-top:0.75rem">✓ Category names saved. They will apply to your next import.</div>';
+}
+
+
+// ── Analytics ─────────────────────────────────────────────────────────────────
+function renderAnalytics() {
+  const db = loadDB();
+  const years = [...new Set(db.map(r => r.weekStart.split('/')[2]))].sort();
+
+  // Populate all year selects
+  ['drill-year','cattrend-year','peak-year'].forEach(id => {
+    const sel = document.getElementById(id);
+    const cur = sel.value;
+    const hasAll = id !== 'drill-year';
+    sel.innerHTML = (hasAll ? '<option value="all">All Years</option>' : '<option value="">— select —</option>') +
+      years.map(y => `<option value="${y}" ${y===cur?'selected':''}>${y}</option>`).join('');
+    if (!cur && years.length && id === 'drill-year') sel.value = years[years.length - 1];
+  });
+
+  renderDrilldown();
+  renderCatTrend();
+  renderPeaks();
+}
+
+// ── Drill-down ────────────────────────────────────────────────────────────────
+function renderDrilldown() {
+  const db = loadDB();
+  const yr = document.getElementById('drill-year').value;
+  const mo = document.getElementById('drill-month').value;
+
+  let filtered = db;
+  if (yr) filtered = filtered.filter(r => r.weekStart.split('/')[2] === yr);
+  if (mo) filtered = filtered.filter(r => parseInt(r.weekStart.split('/')[0]) === parseInt(mo));
+
+  const title = yr
+    ? (mo ? `${['','January','February','March','April','May','June','July','August','September','October','November','December'][mo]} ${yr}` : yr)
+    : 'All Data';
+  document.getElementById('drill-weeks-title').textContent = `Weekly Breakdown — ${title}`;
+
+  // Bar chart of weeks
+  const maxTotal = Math.max(...filtered.map(r => r.total), 1);
+  document.getElementById('drill-weeks-bars').innerHTML = filtered.length === 0
+    ? '<p style="color:var(--muted);padding:1rem 0">No data for selected period.</p>'
+    : filtered.map(r => `
+        <div class="drilldown-week-row">
+          <span style="min-width:90px;color:var(--muted);font-size:0.8rem">${r.weekStart}</span>
+          <div class="drilldown-bar-wrap"><div class="drilldown-bar" style="width:${Math.round(r.total/maxTotal*100)}%"></div></div>
+          <span style="min-width:50px;text-align:right;font-weight:600">${r.total.toLocaleString()}</span>
+        </div>`).join('');
+
+  // Category donut
+  destroyChart('drill-cats');
+  const catTotals = {};
+  filtered.forEach(r => r.categories.forEach(c => { catTotals[c.name] = (catTotals[c.name]||0) + c.count; }));
+  const cats = Object.entries(catTotals).filter(([,v]) => v > 0).sort((a,b) => b[1]-a[1]);
+  if (cats.length > 0) {
+    charts['drill-cats'] = new Chart(document.getElementById('chart-drill-cats'), {
+      type: 'doughnut',
+      data: {
+        labels: cats.map(([k]) => k),
+        datasets: [{ data: cats.map(([,v]) => v), backgroundColor: COLORS }]
+      },
+      options: { responsive: true, plugins: { legend: { position: 'right', labels: { font: { size: 10 } } } } }
+    });
+  }
+}
+
+// ── Category Trends ───────────────────────────────────────────────────────────
+function renderCatTrend() {
+  const db = loadDB();
+  const yr = document.getElementById('cattrend-year').value;
+  const mode = document.getElementById('cattrend-mode').value;
+
+  const filtered = yr === 'all' ? db : db.filter(r => r.weekStart.split('/')[2] === yr);
+
+  // Collect all category names
+  const allCats = [...new Set(filtered.flatMap(r => r.categories.map(c => c.name)))].sort();
+
+  // Build weekly data points
+  const labels = filtered.map(r => r.weekStart);
+  const datasets = allCats.map((cat, i) => {
+    const data = filtered.map(r => {
+      const c = r.categories.find(x => x.name === cat);
+      if (!c) return null;
+      if (mode === 'pct') return r.total > 0 ? Math.round(c.count / r.total * 1000) / 10 : 0;
+      return c.count;
+    });
+    return {
+      label: cat,
+      data,
+      borderColor: COLORS[i % COLORS.length],
+      backgroundColor: 'transparent',
+      tension: 0.3,
+      pointRadius: 2,
+      spanGaps: false
+    };
+  });
+
+  destroyChart('cattrend');
+  charts['cattrend'] = new Chart(document.getElementById('chart-cattrend'), {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      plugins: { legend: { position: 'top', labels: { font: { size: 10 } } } },
+      scales: {
+        y: {
+          beginAtZero: true,
+          ticks: mode === 'pct' ? { callback: v => v + '%' } : {}
+        }
+      }
+    }
+  });
+}
+
+// ── Peak & Slowest ────────────────────────────────────────────────────────────
+function renderPeaks() {
+  const db = loadDB();
+  const yr = document.getElementById('peak-year').value;
+  const n = parseInt(document.getElementById('peak-n').value);
+
+  const filtered = yr === 'all' ? db : db.filter(r => r.weekStart.split('/')[2] === yr);
+  const sorted = [...filtered].sort((a, b) => b.total - a.total);
+  const highest = sorted.slice(0, n);
+  const lowest = [...filtered].sort((a, b) => a.total - b.total).slice(0, n);
+  const maxTotal = sorted[0]?.total || 1;
+  const maxLow = Math.max(...lowest.map(r => r.total), 1);
+
+  function tableRows(rows, isHigh) {
+    return rows.map((r, i) => `
+      <tr>
+        <td>${r.weekStart}</td>
+        <td><strong>${r.total.toLocaleString()}</strong></td>
+        <td><span class="peak-badge ${isHigh ? 'peak-high' : 'peak-low'}">#${i+1}</span></td>
+      </tr>`).join('');
+  }
+
+  document.getElementById('peak-high-body').innerHTML = tableRows(highest, true);
+  document.getElementById('peak-low-body').innerHTML = tableRows(lowest, false);
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
