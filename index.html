@@ -706,6 +706,22 @@
       </div>
     </div>
 
+    <div class="section-title" style="margin-top:2rem">Emory Patron Breakdown</div>
+    <div class="charts-grid">
+      <div class="chart-card">
+        <h3>Emory Patron Subtypes — All Time</h3>
+        <canvas id="chart-signin-emory-donut"></canvas>
+      </div>
+      <div class="chart-card">
+        <h3>Emory Patron Subtypes — Totals</h3>
+        <canvas id="chart-signin-emory-bar"></canvas>
+      </div>
+      <div class="chart-card" style="grid-column:1/-1">
+        <h3>Weekly Emory Patron Subtypes</h3>
+        <canvas id="chart-signin-emory-stacked"></canvas>
+      </div>
+    </div>
+
     <!-- Stored weeks -->
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
       <div class="section-title" style="margin:0">Stored Sign-In Weeks</div>
@@ -1508,54 +1524,63 @@ async function deleteSigninReport(weekStart) {
   invalidateSigninCache();
 }
 
+async function updateSigninReport(weekStart, categories, total) {
+  const { error } = await sb.from('signin_reports').update({ categories, total }).eq('week_start', weekStart);
+  if (error) throw new Error(error.message);
+  invalidateSigninCache();
+}
+
 // Parse the LibWizard CSV
 function parseSigninCSV(text) {
-  // Normalize line endings
   text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const lines = text.trim().split('\n');
   if (lines.length < 2) throw new Error('CSV appears empty.');
 
-  // Parse header to find column indices
   const header = parseCSVRow(lines[0]);
   const submittedIdx = header.findIndex(h => h.toLowerCase().includes('submitted'));
   const patronIdx    = header.findIndex(h => h.toLowerCase().includes('patron type'));
+  const subtypeIdx   = header.findIndex(h => h.toLowerCase().includes('which of the following'));
   if (submittedIdx === -1) throw new Error('Could not find "Submitted" column.');
   if (patronIdx === -1)    throw new Error('Could not find "Patron Type" column.');
 
-  // Parse rows, extract date + patron type
   const entries = [];
   for (let i = 1; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
     const cols = parseCSVRow(lines[i]);
-    const dateStr   = cols[submittedIdx] || '';
+    const dateStr    = cols[submittedIdx] || '';
     const patronType = (cols[patronIdx] || 'Unknown').trim();
+    const subtype    = subtypeIdx !== -1 ? (cols[subtypeIdx] || '').trim() : '';
     const date = new Date(dateStr);
     if (isNaN(date)) continue;
-    entries.push({ date, patronType });
+    entries.push({ date, patronType, subtype });
   }
 
   if (entries.length === 0) throw new Error('No valid rows found in CSV.');
 
-  // Group by ISO week (week starting Monday)
+  // Group by week — track top-level types AND Emory Patron subtypes
   const weekMap = {};
-  entries.forEach(({ date, patronType }) => {
+  entries.forEach(({ date, patronType, subtype }) => {
     const weekStart = getWeekStart(date);
     if (!weekMap[weekStart]) weekMap[weekStart] = {};
+
+    // Top-level patron type
     weekMap[weekStart][patronType] = (weekMap[weekStart][patronType] || 0) + 1;
+
+    // Emory Patron subtype stored as "Emory Patron — <Subtype>"
+    if (patronType === 'Emory Patron' && subtype) {
+      const key = `Emory Patron — ${subtype}`;
+      weekMap[weekStart][key] = (weekMap[weekStart][key] || 0) + 1;
+    }
   });
 
-  // Convert to report objects (one per week)
   return Object.entries(weekMap).map(([weekStart, counts]) => {
     const categories = Object.entries(counts).map(([name, count]) => ({ name, count }));
-    const total = categories.reduce((s, c) => s + c.count, 0);
+    const total = Object.entries(counts)
+      .filter(([name]) => !name.startsWith('Emory Patron — '))
+      .reduce((s, [, count]) => s + count, 0);
     const weekEndDate = new Date(weekStart);
     weekEndDate.setDate(weekEndDate.getDate() + 6);
-    return {
-      weekStart,
-      weekEnd: formatDate(weekEndDate),
-      categories,
-      total
-    };
+    return { weekStart, weekEnd: formatDate(weekEndDate), categories, total };
   }).sort((a, b) => a.weekStart.localeCompare(b.weekStart));
 }
 
@@ -1599,20 +1624,23 @@ function handleSigninFileInput(input) {
 
 async function importSigninFiles(files) {
   const db = await loadSigninDB();
-  let imported = 0, skipped = 0, failed = 0;
+  let imported = 0, updated = 0, failed = 0;
   const failList = [];
+
+  // Build a map of all new entries across all files: weekStart -> { patronType -> count }
+  const newWeekMap = {};
 
   for (const file of files) {
     const text = await file.text();
     try {
       const weekReports = parseSigninCSV(text);
       for (const report of weekReports) {
-        if (db.find(r => r.weekStart === report.weekStart)) {
-          skipped++;
-          continue;
+        if (!newWeekMap[report.weekStart]) {
+          newWeekMap[report.weekStart] = { weekEnd: report.weekEnd, counts: {} };
         }
-        await insertSigninReport(report);
-        imported++;
+        report.categories.forEach(c => {
+          newWeekMap[report.weekStart].counts[c.name] = (newWeekMap[report.weekStart].counts[c.name] || 0) + c.count;
+        });
       }
     } catch (e) {
       failed++;
@@ -1620,13 +1648,52 @@ async function importSigninFiles(files) {
     }
   }
 
-  let msg = `✓ Imported <strong>${imported}</strong> week${imported !== 1 ? 's' : ''}.`;
-  if (skipped) msg += ` <strong>${skipped}</strong> skipped (already stored).`;
-  if (failed)  msg += ` <strong>${failed}</strong> failed.`;
+  // Now upsert each week
+  for (const [weekStart, { weekEnd, counts }] of Object.entries(newWeekMap)) {
+    const existing = db.find(r => r.weekStart === weekStart);
+    const categories = Object.entries(counts).map(([name, count]) => ({ name, count }));
+    const total = categories.reduce((s, c) => s + c.count, 0);
+
+    if (existing) {
+      // Merge: combine existing counts with new counts
+      const merged = {};
+      existing.categories.forEach(c => { merged[c.name] = c.count; });
+      categories.forEach(c => { merged[c.name] = (merged[c.name] || 0) + c.count; });
+      const mergedCats = Object.entries(merged).map(([name, count]) => ({ name, count }));
+      const mergedTotal = mergedCats.reduce((s, c) => s + c.count, 0);
+
+      // Only update if counts actually changed
+      if (mergedTotal !== existing.total) {
+        try {
+          await updateSigninReport(weekStart, mergedCats, mergedTotal);
+          updated++;
+        } catch (e) {
+          failed++;
+          failList.push(`${weekStart}: ${e.message}`);
+        }
+      }
+    } else {
+      try {
+        await insertSigninReport({ weekStart, weekEnd, categories, total });
+        imported++;
+      } catch (e) {
+        failed++;
+        failList.push(`${weekStart}: ${e.message}`);
+      }
+    }
+  }
+
+  invalidateSigninCache();
+
+  let msg = '';
+  if (imported) msg += `✓ Imported <strong>${imported}</strong> new week${imported !== 1 ? 's' : ''}. `;
+  if (updated)  msg += `✓ Updated <strong>${updated}</strong> existing week${updated !== 1 ? 's' : ''} with new entries. `;
+  if (!imported && !updated && !failed) msg = 'No new data found — all weeks are already up to date.';
+  if (failed)   msg += `<strong>${failed}</strong> failed.`;
   if (failList.length) msg += `<br><small style="opacity:0.7">${failList.join(', ')}</small>`;
 
   document.getElementById('signin-alert-area').innerHTML =
-    `<div class="alert alert-${failed && !imported ? 'error' : 'success'}" style="margin-top:1rem">${msg}</div>`;
+    `<div class="alert alert-${failed && !imported && !updated ? 'error' : 'success'}" style="margin-top:1rem">${msg}</div>`;
 
   renderSignin();
 }
@@ -1659,13 +1726,23 @@ function destroySigninChart(key) {
 async function renderSignin() {
   const db = await loadSigninDB();
 
+  // Separate top-level types from subtypes
+  const isSubtype = name => name.startsWith('Emory Patron — ');
+
   // ── Stats ──────────────────────────────────────────────────────────────────
   const totalVisits = db.reduce((s, r) => s + r.total, 0);
-  const allTypes = [...new Set(db.flatMap(r => r.categories.map(c => c.name)))];
+  const allTypes = [...new Set(db.flatMap(r => r.categories.filter(c => !isSubtype(c.name)).map(c => c.name)))];
   const typeTotals = {};
   allTypes.forEach(t => { typeTotals[t] = db.reduce((s, r) => s + (r.categories.find(c => c.name === t)?.count || 0), 0); });
   const topType = Object.entries(typeTotals).sort((a,b) => b[1]-a[1])[0];
   const latestWeek = db[db.length - 1];
+
+  // Emory Patron subtype totals
+  const allSubtypes = [...new Set(db.flatMap(r => r.categories.filter(c => isSubtype(c.name)).map(c => c.name)))];
+  const subtypeTotals = {};
+  allSubtypes.forEach(t => { subtypeTotals[t] = db.reduce((s, r) => s + (r.categories.find(c => c.name === t)?.count || 0), 0); });
+  const sortedSubtypes = Object.entries(subtypeTotals).sort((a,b) => b[1]-a[1]);
+  const emoryTotal = db.reduce((s, r) => s + (r.categories.find(c => c.name === 'Emory Patron')?.count || 0), 0);
 
   document.getElementById('signin-stats-grid').innerHTML = db.length === 0
     ? '<div class="empty-state"><h3>No sign-in data yet</h3><p>Upload a CSV above to get started.</p></div>'
@@ -1686,9 +1763,9 @@ async function renderSignin() {
       <div class="stat-sub">${topType?.[1].toLocaleString() ?? ''} total · ${totalVisits > 0 ? Math.round(topType[1]/totalVisits*100) : 0}%</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Weekly Average</div>
-      <div class="stat-value">${db.length ? Math.round(totalVisits / db.length).toLocaleString() : '—'}</div>
-      <div class="stat-sub">Sign-ins per week</div>
+      <div class="stat-label">Top Emory Subtype</div>
+      <div class="stat-value" style="font-size:1rem">${sortedSubtypes[0] ? sortedSubtypes[0][0].replace('Emory Patron — ','') : '—'}</div>
+      <div class="stat-sub">${sortedSubtypes[0] ? sortedSubtypes[0][1].toLocaleString() + ' · ' + (emoryTotal > 0 ? Math.round(sortedSubtypes[0][1]/emoryTotal*100) : 0) + '% of Emory' : ''}</div>
     </div>`;
 
   if (db.length === 0) return;
@@ -1712,7 +1789,7 @@ async function renderSignin() {
     options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
   });
 
-  // ── Donut ──────────────────────────────────────────────────────────────────
+  // ── Top-level donut ────────────────────────────────────────────────────────
   const sortedTypes = Object.entries(typeTotals).sort((a,b) => b[1]-a[1]);
   destroySigninChart('donut');
   signinCharts['donut'] = new Chart(document.getElementById('chart-signin-donut'), {
@@ -1730,7 +1807,7 @@ async function renderSignin() {
     }
   });
 
-  // ── Stacked bar ────────────────────────────────────────────────────────────
+  // ── Top-level stacked bar ──────────────────────────────────────────────────
   destroySigninChart('stacked');
   signinCharts['stacked'] = new Chart(document.getElementById('chart-signin-stacked'), {
     type: 'bar',
@@ -1750,16 +1827,81 @@ async function renderSignin() {
     }
   });
 
+  // ── Emory subtype donut ────────────────────────────────────────────────────
+  const EMORY_COLORS = ['#b8922a','#d4a83a','#c4a030','#e8c060','#a07820','#8a6010','#f0d080','#6a5010'];
+  destroySigninChart('emory-donut');
+  if (sortedSubtypes.length > 0) {
+    signinCharts['emory-donut'] = new Chart(document.getElementById('chart-signin-emory-donut'), {
+      type: 'doughnut',
+      data: {
+        labels: sortedSubtypes.map(([k]) => k.replace('Emory Patron — ', '')),
+        datasets: [{ data: sortedSubtypes.map(([,v]) => v), backgroundColor: EMORY_COLORS }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { position: 'right', labels: { font: { size: 11 } } },
+          tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${ctx.parsed.toLocaleString()} (${emoryTotal > 0 ? (ctx.parsed/emoryTotal*100).toFixed(1) : 0}% of Emory)` } }
+        }
+      }
+    });
+  }
+
+  // ── Emory subtype bar ──────────────────────────────────────────────────────
+  destroySigninChart('emory-bar');
+  if (sortedSubtypes.length > 0) {
+    signinCharts['emory-bar'] = new Chart(document.getElementById('chart-signin-emory-bar'), {
+      type: 'bar',
+      data: {
+        labels: sortedSubtypes.map(([k]) => k.replace('Emory Patron — ', '')),
+        datasets: [{ data: sortedSubtypes.map(([,v]) => v), backgroundColor: EMORY_COLORS, borderRadius: 4 }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ` ${ctx.parsed.x.toLocaleString()}` } } },
+        scales: { x: { beginAtZero: true } }
+      }
+    });
+  }
+
+  // ── Emory subtype stacked bar ──────────────────────────────────────────────
+  destroySigninChart('emory-stacked');
+  if (sortedSubtypes.length > 0) {
+    signinCharts['emory-stacked'] = new Chart(document.getElementById('chart-signin-emory-stacked'), {
+      type: 'bar',
+      data: {
+        labels: db.map(r => r.weekStart),
+        datasets: sortedSubtypes.map(([type], i) => ({
+          label: type.replace('Emory Patron — ', ''),
+          data: db.map(r => r.categories.find(c => c.name === type)?.count || 0),
+          backgroundColor: EMORY_COLORS[i % EMORY_COLORS.length],
+          borderRadius: 2
+        }))
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { position: 'top', labels: { font: { size: 10 } } }, tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y}` } } },
+        scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } }
+      }
+    });
+  }
+
   // ── Stored weeks list ──────────────────────────────────────────────────────
-  document.getElementById('signin-weeks-list').innerHTML = [...db].reverse().map(r => `
+  document.getElementById('signin-weeks-list').innerHTML = [...db].reverse().map(r => {
+    const topLevel = r.categories.filter(c => !isSubtype(c.name));
+    const subs = r.categories.filter(c => isSubtype(c.name));
+    const subStr = subs.length ? `<br><span style="font-size:0.75rem;color:var(--muted)">${subs.map(c => `${c.name.replace('Emory Patron — ','')}: ${c.count}`).join(' · ')}</span>` : '';
+    return `
     <div class="week-entry">
       <div class="week-info">
         <h4>Week of ${r.weekStart}${r.weekEnd ? ' – ' + r.weekEnd : ''}</h4>
-        <p>${r.categories.map(c => `${c.name}: ${c.count}`).join(' · ')}</p>
+        <p>${topLevel.map(c => `${c.name}: ${c.count}`).join(' · ')}${subStr}</p>
       </div>
       <div class="week-total">${r.total.toLocaleString()}</div>
       <button class="delete-btn" onclick="deleteSignin('${r.weekStart}')">🗑 Delete</button>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 async function deleteSignin(weekStart) {
@@ -1775,8 +1917,16 @@ async function deleteSignin(weekStart) {
 async function exportSigninCSV() {
   const db = await loadSigninDB();
   if (db.length === 0) { alert('No sign-in data to export.'); return; }
-  const rows = [['Week Start', 'Week End', 'Patron Type', 'Count', 'Week Total']];
-  db.forEach(r => r.categories.forEach(c => rows.push([r.weekStart, r.weekEnd || '', c.name, c.count, r.total])));
+  const isSubtype = name => name.startsWith('Emory Patron — ');
+  const rows = [['Week Start', 'Week End', 'Patron Type', 'Subtype', 'Count', 'Week Total']];
+  db.forEach(r => {
+    r.categories.filter(c => !isSubtype(c.name)).forEach(c => {
+      rows.push([r.weekStart, r.weekEnd || '', c.name, '', c.count, r.total]);
+    });
+    r.categories.filter(c => isSubtype(c.name)).forEach(c => {
+      rows.push([r.weekStart, r.weekEnd || '', 'Emory Patron', c.name.replace('Emory Patron — ',''), c.count, '']);
+    });
+  });
   const csv = rows.map(r => r.map(v => `"${v}"`).join(',')).join('\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
