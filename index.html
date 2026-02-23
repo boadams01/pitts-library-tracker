@@ -1495,13 +1495,14 @@ async function loadSigninDB() {
   if (_signinCache) return _signinCache;
   const { data, error } = await sb.from('signin_reports').select('*').order('week_start', { ascending: true });
   if (error) { console.error('Supabase signin load error:', error); return []; }
+  const parseMMDDYYYY = s => { const [m,d,y] = s.split('/'); return new Date(y, m-1, d); };
   _signinCache = data.map(r => ({
     weekStart: r.week_start,
     weekEnd: r.week_end,
     categories: r.categories,
     total: r.total,
     savedAt: r.saved_at
-  }));
+  })).sort((a, b) => parseMMDDYYYY(a.weekStart) - parseMMDDYYYY(b.weekStart));
   return _signinCache;
 }
 
@@ -1586,7 +1587,11 @@ function parseSigninCSV(text) {
     const weekEndDate = new Date(weekStart);
     weekEndDate.setDate(weekEndDate.getDate() + 6);
     return { weekStart, weekEnd: formatDate(weekEndDate), categories, total };
-  }).sort((a, b) => a.weekStart.localeCompare(b.weekStart));
+  }).sort((a, b) => {
+    // Sort chronologically by parsing MM/DD/YYYY properly
+    const parseDate = s => { const [m,d,y] = s.split('/'); return new Date(y, m-1, d); };
+    return parseDate(a.weekStart) - parseDate(b.weekStart);
+  });
 }
 
 function parseCSVRow(line) {
