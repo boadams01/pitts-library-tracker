@@ -496,6 +496,7 @@
     <button class="nav-tab" onclick="switchView('import')">Import Report</button>
     <button class="nav-tab" onclick="switchView('data')">Data &amp; Export</button>
     <button class="nav-tab" onclick="switchView('analytics')">Analytics</button>
+    <button class="nav-tab" onclick="switchView('signin')">Sign-In Reports</button>
     <button class="nav-tab" onclick="switchView('settings')">⚙ Settings</button>
   </div>
 </header>
@@ -673,6 +674,47 @@
 
   </div>
 
+  <!-- SIGN-IN REPORTS VIEW -->
+  <div class="view" id="view-signin">
+
+    <!-- Import CSV -->
+    <div class="section-title">Import Sign-In CSV</div>
+    <div class="import-area" id="signin-drop-zone">
+      <input type="file" accept=".csv" multiple onchange="handleSigninFileInput(this)">
+      <span class="import-icon">📋</span>
+      <h3>Drop your sign-in CSV files here</h3>
+      <p>or click to browse — exported from LibWizard with Submitted date and Patron Type columns</p>
+    </div>
+    <div id="signin-alert-area"></div>
+
+    <!-- Dashboard -->
+    <div class="section-title" style="margin-top:2rem">Sign-In Overview</div>
+    <div class="stats-grid" id="signin-stats-grid"></div>
+
+    <div class="charts-grid">
+      <div class="chart-card">
+        <h3>Weekly Sign-Ins Over Time</h3>
+        <canvas id="chart-signin-trend"></canvas>
+      </div>
+      <div class="chart-card">
+        <h3>Patron Type Breakdown</h3>
+        <canvas id="chart-signin-donut"></canvas>
+      </div>
+      <div class="chart-card" style="grid-column:1/-1">
+        <h3>Weekly Sign-Ins by Patron Type</h3>
+        <canvas id="chart-signin-stacked"></canvas>
+      </div>
+    </div>
+
+    <!-- Stored weeks -->
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
+      <div class="section-title" style="margin:0">Stored Sign-In Weeks</div>
+      <button class="btn btn-gold" onclick="exportSigninCSV()">⬇ Export CSV</button>
+    </div>
+    <div id="signin-weeks-list"></div>
+
+  </div>
+
   <!-- SETTINGS VIEW -->
   <div class="view" id="view-settings">
     <div class="section-title">Category Name Settings</div>
@@ -753,6 +795,7 @@ function switchView(name) {
   if (name === 'data') renderData();
   if (name === 'settings') renderSettings();
   if (name === 'analytics') renderAnalytics();
+  if (name === 'signin') renderSignin();
 }
 
 // ── Parsing ───────────────────────────────────────────────────────────────────
@@ -1427,6 +1470,318 @@ async function renderPeaks() {
 
   document.getElementById('peak-high-body').innerHTML = tableRows(highest, true);
   document.getElementById('peak-low-body').innerHTML = tableRows(lowest, false);
+}
+
+// ── Sign-In Reports ───────────────────────────────────────────────────────────
+let _signinCache = null;
+
+async function loadSigninDB() {
+  if (_signinCache) return _signinCache;
+  const { data, error } = await sb.from('signin_reports').select('*').order('week_start', { ascending: true });
+  if (error) { console.error('Supabase signin load error:', error); return []; }
+  _signinCache = data.map(r => ({
+    weekStart: r.week_start,
+    weekEnd: r.week_end,
+    categories: r.categories,
+    total: r.total,
+    savedAt: r.saved_at
+  }));
+  return _signinCache;
+}
+
+function invalidateSigninCache() { _signinCache = null; }
+
+async function insertSigninReport(report) {
+  const { error } = await sb.from('signin_reports').insert({
+    week_start: report.weekStart,
+    week_end: report.weekEnd || null,
+    categories: report.categories,
+    total: report.total
+  });
+  if (error) throw new Error(error.message);
+  invalidateSigninCache();
+}
+
+async function deleteSigninReport(weekStart) {
+  const { error } = await sb.from('signin_reports').delete().eq('week_start', weekStart);
+  if (error) throw new Error(error.message);
+  invalidateSigninCache();
+}
+
+// Parse the LibWizard CSV
+function parseSigninCSV(text) {
+  // Normalize line endings
+  text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const lines = text.trim().split('\n');
+  if (lines.length < 2) throw new Error('CSV appears empty.');
+
+  // Parse header to find column indices
+  const header = parseCSVRow(lines[0]);
+  const submittedIdx = header.findIndex(h => h.toLowerCase().includes('submitted'));
+  const patronIdx    = header.findIndex(h => h.toLowerCase().includes('patron type'));
+  if (submittedIdx === -1) throw new Error('Could not find "Submitted" column.');
+  if (patronIdx === -1)    throw new Error('Could not find "Patron Type" column.');
+
+  // Parse rows, extract date + patron type
+  const entries = [];
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    const cols = parseCSVRow(lines[i]);
+    const dateStr   = cols[submittedIdx] || '';
+    const patronType = (cols[patronIdx] || 'Unknown').trim();
+    const date = new Date(dateStr);
+    if (isNaN(date)) continue;
+    entries.push({ date, patronType });
+  }
+
+  if (entries.length === 0) throw new Error('No valid rows found in CSV.');
+
+  // Group by ISO week (week starting Monday)
+  const weekMap = {};
+  entries.forEach(({ date, patronType }) => {
+    const weekStart = getWeekStart(date);
+    if (!weekMap[weekStart]) weekMap[weekStart] = {};
+    weekMap[weekStart][patronType] = (weekMap[weekStart][patronType] || 0) + 1;
+  });
+
+  // Convert to report objects (one per week)
+  return Object.entries(weekMap).map(([weekStart, counts]) => {
+    const categories = Object.entries(counts).map(([name, count]) => ({ name, count }));
+    const total = categories.reduce((s, c) => s + c.count, 0);
+    const weekEndDate = new Date(weekStart);
+    weekEndDate.setDate(weekEndDate.getDate() + 6);
+    return {
+      weekStart,
+      weekEnd: formatDate(weekEndDate),
+      categories,
+      total
+    };
+  }).sort((a, b) => a.weekStart.localeCompare(b.weekStart));
+}
+
+function parseCSVRow(line) {
+  // Handle quoted fields with commas inside
+  const cols = [];
+  let cur = '', inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { inQuote = !inQuote; continue; }
+    if (ch === ',' && !inQuote) { cols.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
+  }
+  cols.push(cur.trim());
+  return cols;
+}
+
+function getWeekStart(date) {
+  // Week starts Monday
+  const d = new Date(date);
+  const day = d.getDay(); // 0=Sun
+  const diff = (day === 0) ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return formatDate(d);
+}
+
+function formatDate(d) {
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  return `${mm}/${dd}/${yyyy}`;
+}
+
+// Handle file input for Sign-In tab
+function handleSigninFileInput(input) {
+  const files = Array.from(input.files).filter(f => f.name.endsWith('.csv'));
+  if (files.length === 0) return;
+  importSigninFiles(files);
+  input.value = '';
+}
+
+async function importSigninFiles(files) {
+  const db = await loadSigninDB();
+  let imported = 0, skipped = 0, failed = 0;
+  const failList = [];
+
+  for (const file of files) {
+    const text = await file.text();
+    try {
+      const weekReports = parseSigninCSV(text);
+      for (const report of weekReports) {
+        if (db.find(r => r.weekStart === report.weekStart)) {
+          skipped++;
+          continue;
+        }
+        await insertSigninReport(report);
+        imported++;
+      }
+    } catch (e) {
+      failed++;
+      failList.push(`${file.name}: ${e.message}`);
+    }
+  }
+
+  let msg = `✓ Imported <strong>${imported}</strong> week${imported !== 1 ? 's' : ''}.`;
+  if (skipped) msg += ` <strong>${skipped}</strong> skipped (already stored).`;
+  if (failed)  msg += ` <strong>${failed}</strong> failed.`;
+  if (failList.length) msg += `<br><small style="opacity:0.7">${failList.join(', ')}</small>`;
+
+  document.getElementById('signin-alert-area').innerHTML =
+    `<div class="alert alert-${failed && !imported ? 'error' : 'success'}" style="margin-top:1rem">${msg}</div>`;
+
+  renderSignin();
+}
+
+// Drag & drop for signin
+const signinDZ = document.getElementById('signin-drop-zone');
+signinDZ.addEventListener('dragover', e => { e.preventDefault(); signinDZ.classList.add('drag-over'); });
+signinDZ.addEventListener('dragleave', () => signinDZ.classList.remove('drag-over'));
+signinDZ.addEventListener('drop', e => {
+  e.preventDefault();
+  signinDZ.classList.remove('drag-over');
+  const files = Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.csv'));
+  if (files.length > 0) importSigninFiles(files);
+});
+
+// Render Sign-In tab
+const SIGNIN_COLORS = {
+  'Non-Emory Visitor': '#8b3a15',
+  'Emory Patron':      '#b8922a',
+  'Emory Alum':        '#2d6a4f',
+  'Unknown':           '#7a6e5f',
+};
+const SIGNIN_COLOR_LIST = ['#8b3a15','#b8922a','#2d6a4f','#3a4a8b','#7a3a8b','#7a6e5f'];
+
+let signinCharts = {};
+function destroySigninChart(key) {
+  if (signinCharts[key]) { signinCharts[key].destroy(); delete signinCharts[key]; }
+}
+
+async function renderSignin() {
+  const db = await loadSigninDB();
+
+  // ── Stats ──────────────────────────────────────────────────────────────────
+  const totalVisits = db.reduce((s, r) => s + r.total, 0);
+  const allTypes = [...new Set(db.flatMap(r => r.categories.map(c => c.name)))];
+  const typeTotals = {};
+  allTypes.forEach(t => { typeTotals[t] = db.reduce((s, r) => s + (r.categories.find(c => c.name === t)?.count || 0), 0); });
+  const topType = Object.entries(typeTotals).sort((a,b) => b[1]-a[1])[0];
+  const latestWeek = db[db.length - 1];
+
+  document.getElementById('signin-stats-grid').innerHTML = db.length === 0
+    ? '<div class="empty-state"><h3>No sign-in data yet</h3><p>Upload a CSV above to get started.</p></div>'
+    : `
+    <div class="stat-card">
+      <div class="stat-label">Total Sign-Ins</div>
+      <div class="stat-value">${totalVisits.toLocaleString()}</div>
+      <div class="stat-sub">Across ${db.length} weeks</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Latest Week Total</div>
+      <div class="stat-value">${latestWeek?.total.toLocaleString() ?? '—'}</div>
+      <div class="stat-sub">Week of ${latestWeek?.weekStart ?? ''}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Most Common Patron Type</div>
+      <div class="stat-value" style="font-size:1.1rem">${topType?.[0] ?? '—'}</div>
+      <div class="stat-sub">${topType?.[1].toLocaleString() ?? ''} total · ${totalVisits > 0 ? Math.round(topType[1]/totalVisits*100) : 0}%</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Weekly Average</div>
+      <div class="stat-value">${db.length ? Math.round(totalVisits / db.length).toLocaleString() : '—'}</div>
+      <div class="stat-sub">Sign-ins per week</div>
+    </div>`;
+
+  if (db.length === 0) return;
+
+  // ── Trend line ─────────────────────────────────────────────────────────────
+  destroySigninChart('trend');
+  signinCharts['trend'] = new Chart(document.getElementById('chart-signin-trend'), {
+    type: 'line',
+    data: {
+      labels: db.map(r => r.weekStart),
+      datasets: [{
+        label: 'Total Sign-Ins',
+        data: db.map(r => r.total),
+        borderColor: '#8b3a15',
+        backgroundColor: 'rgba(139,58,21,0.08)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3
+      }]
+    },
+    options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+  });
+
+  // ── Donut ──────────────────────────────────────────────────────────────────
+  const sortedTypes = Object.entries(typeTotals).sort((a,b) => b[1]-a[1]);
+  destroySigninChart('donut');
+  signinCharts['donut'] = new Chart(document.getElementById('chart-signin-donut'), {
+    type: 'doughnut',
+    data: {
+      labels: sortedTypes.map(([k]) => k),
+      datasets: [{ data: sortedTypes.map(([,v]) => v), backgroundColor: sortedTypes.map(([k], i) => SIGNIN_COLORS[k] || SIGNIN_COLOR_LIST[i]) }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { position: 'right', labels: { font: { size: 11 } } },
+        tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${ctx.parsed.toLocaleString()} (${totalVisits > 0 ? (ctx.parsed/totalVisits*100).toFixed(1) : 0}%)` } }
+      }
+    }
+  });
+
+  // ── Stacked bar ────────────────────────────────────────────────────────────
+  destroySigninChart('stacked');
+  signinCharts['stacked'] = new Chart(document.getElementById('chart-signin-stacked'), {
+    type: 'bar',
+    data: {
+      labels: db.map(r => r.weekStart),
+      datasets: sortedTypes.map(([type], i) => ({
+        label: type,
+        data: db.map(r => r.categories.find(c => c.name === type)?.count || 0),
+        backgroundColor: SIGNIN_COLORS[type] || SIGNIN_COLOR_LIST[i],
+        borderRadius: 2
+      }))
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { position: 'top' }, tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y}` } } },
+      scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } }
+    }
+  });
+
+  // ── Stored weeks list ──────────────────────────────────────────────────────
+  document.getElementById('signin-weeks-list').innerHTML = [...db].reverse().map(r => `
+    <div class="week-entry">
+      <div class="week-info">
+        <h4>Week of ${r.weekStart}${r.weekEnd ? ' – ' + r.weekEnd : ''}</h4>
+        <p>${r.categories.map(c => `${c.name}: ${c.count}`).join(' · ')}</p>
+      </div>
+      <div class="week-total">${r.total.toLocaleString()}</div>
+      <button class="delete-btn" onclick="deleteSignin('${r.weekStart}')">🗑 Delete</button>
+    </div>`).join('');
+}
+
+async function deleteSignin(weekStart) {
+  if (!confirm(`Delete sign-in data for week of ${weekStart}?`)) return;
+  try {
+    await deleteSigninReport(weekStart);
+    renderSignin();
+  } catch(e) {
+    alert('Error deleting: ' + e.message);
+  }
+}
+
+async function exportSigninCSV() {
+  const db = await loadSigninDB();
+  if (db.length === 0) { alert('No sign-in data to export.'); return; }
+  const rows = [['Week Start', 'Week End', 'Patron Type', 'Count', 'Week Total']];
+  db.forEach(r => r.categories.forEach(c => rows.push([r.weekStart, r.weekEnd || '', c.name, c.count, r.total])));
+  const csv = rows.map(r => r.map(v => `"${v}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = `pitts_signin_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
