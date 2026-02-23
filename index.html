@@ -1515,7 +1515,8 @@ async function insertSigninReport(report) {
     total: report.total
   });
   if (error) throw new Error(error.message);
-  invalidateSigninCache();
+  // Update cache in place so subsequent inserts in the same batch see it
+  if (_signinCache) _signinCache.push({ weekStart: report.weekStart, weekEnd: report.weekEnd, categories: report.categories, total: report.total });
 }
 
 async function deleteSigninReport(weekStart) {
@@ -1527,7 +1528,11 @@ async function deleteSigninReport(weekStart) {
 async function updateSigninReport(weekStart, categories, total) {
   const { error } = await sb.from('signin_reports').update({ categories, total }).eq('week_start', weekStart);
   if (error) throw new Error(error.message);
-  invalidateSigninCache();
+  // Update cache in place
+  if (_signinCache) {
+    const r = _signinCache.find(r => r.weekStart === weekStart);
+    if (r) { r.categories = categories; r.total = total; }
+  }
 }
 
 // Parse the LibWizard CSV
@@ -1650,9 +1655,13 @@ async function importSigninFiles(files) {
 
   // Now upsert each week
   for (const [weekStart, { weekEnd, counts }] of Object.entries(newWeekMap)) {
-    const existing = db.find(r => r.weekStart === weekStart);
+    // Re-check against the live cache each time (don't invalidate mid-loop)
+    const currentDB = await loadSigninDB();
+    const existing = currentDB.find(r => r.weekStart === weekStart);
     const categories = Object.entries(counts).map(([name, count]) => ({ name, count }));
-    const total = categories.reduce((s, c) => s + c.count, 0);
+    const total = categories
+      .filter(c => !c.name.startsWith('Emory Patron — '))
+      .reduce((s, c) => s + c.count, 0);
 
     if (existing) {
       // Merge: combine existing counts with new counts
@@ -1683,6 +1692,7 @@ async function importSigninFiles(files) {
     }
   }
 
+  // Refresh cache once after all inserts/updates are done
   invalidateSigninCache();
 
   let msg = '';
